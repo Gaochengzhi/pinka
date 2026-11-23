@@ -40,3 +40,24 @@ def test_cpu_and_ram():
     assert B.ram_need(spec, {}, 20.0, 1.0) == 21.0
     assert B.ram_need({}, {}, 0.0, 1.0) == 1.0
     assert B.ram_reserve(dict(t0=0.0, rss_now=2.0), now=150.0, need=10.0, young_s=300) == 4.0
+
+
+def test_conc_shares_learns_from_card_minutes():
+    jobs = [dict(spec=dict(name="ev-%d" % i, vram_gb=10), gpu=0, t0=1.0, t1=10000.0, state="done") for i in range(2)]
+    jobs.append(dict(spec=dict(name="other", vram_gb=10), gpu=1, t0=1.0, state="running"))
+    lines = [dict(t=100 + 60 * k, cards={"0": [50, 8.0 + (k == 0), 20.0, 2], "1": [50, 5.0, 10.0, 1]}) for k in range(40)]
+    out = B.conc_shares(lines, jobs, now=5000.0, min_n=30)
+    assert list(out) == ["ev"] and out["ev"]["n_max"] == 2 and out["ev"]["share"] == 4.5   # p99 of 40 samples: the top one
+    assert B.conc_shares(lines, jobs, now=5000.0, min_n=41) == {}          # too few card-minutes to trust
+
+
+def test_conc_group_and_add():
+    info = dict(share=3.0, n_max=3)
+    assert B.conc_group(1, 0.0, 10.0, 10.0, 3.0, 1.1) == 10.0              # one job: its own booking
+    assert B.conc_group(4, 0.0, 40.0, 10.0, 3.0, 1.1) == 13.2              # four: 4 x 1.1 x 3
+    assert B.conc_group(4, 20.0, 40.0, 10.0, 3.0, 1.1) == 20.0             # never below what they use now
+    g = dict(m=3, act=0.0, own_sum=30.0, own_max=10.0, booked=10.0)
+    assert B.conc_add(g, info, 10.0, 1.1) == 3.2                           # the fourth adds the group's growth
+    assert B.conc_add(dict(g, m=4), info, 10.0, 1.1) == 10.0               # beyond n_max + 1: its own booking
+    assert not B.conc_eligible(dict(name="ev", vram_gb=10, exclusive=True), {"ev": info})
+    assert not B.conc_eligible(dict(name="ev", vram_gb=10), {"ev": info}, seen=30.0)

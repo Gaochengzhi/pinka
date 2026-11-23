@@ -13,7 +13,8 @@ from pathlib import Path
 DEFAULTS = dict(
     poll_s=10.0,            # seconds between dispatcher rounds
     fast_poll_s=3.0,        # ... while host memory is close to the line
-    gpu_backend="nvidia-smi",   # "nvidia-smi", "none", or "fake:2x24" (two fake 24 GB cards, for tests and dry runs)
+    gpu_backend="auto",     # "auto" (pynvml if installed, else nvidia-smi), "nvml", "nvidia-smi", "none", or
+                            # "fake:2x24" (two fake 24 GB cards, for tests and dry runs); env PINKA_GPU_BACKEND wins
     smi_age_s=10.0,         # nvidia-smi answers are reused this long
     cards=None,             # card indices the pool may use (None: all, or the CUDA_VISIBLE_DEVICES the dispatcher starts with)
     headroom_gb=2.0,        # VRAM kept free on every card
@@ -40,6 +41,12 @@ DEFAULTS = dict(
     kill_retries=2,         # requeues after the job's root dies of SIGKILL without a pool stop (host OOM killer)
     over_stop_free_gb=1.0,  # a job above its VRAM declaration on a card with less free than this is stopped (0: never)
     tag_caps={},            # per-card caps by job tag, e.g. {"train": 2}
+    conc=True,              # book same-key jobs on a card together, by their measured concurrent use (README)
+    conc_margin=1.1,
+    conc_hours=72.0,        # ... learned from this much of usage.jsonl
+    conc_min=30,            # ... card-minutes at one job count before that count is trusted
+    conc_q=0.99,
+    conc_every_s=1800.0,    # ... re-learned this often
     low_memory_gb=0.0,      # call the low_memory hook while the margin under the RAM line is below this (0: never)
     low_memory_every_s=30.0,
     keep_days=14.0,         # finished jobs leave state.json after this many days (their jobs/<id>/ folder stays)

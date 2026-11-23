@@ -64,6 +64,7 @@ class Acct:
     exclusive: bool = False
     reserved_for: str = ""
     tags: dict = field(default_factory=dict)
+    conc: dict = field(default_factory=dict)   # history key -> {m, act, own_sum, own_max, booked}: jobs booked together
 
     def avail(self, headroom: float) -> float:
         return self.total_gb - headroom - self.foreign_gb - self.pool_gb
@@ -87,21 +88,21 @@ def fits(s: Spec, a: Acct, cfg: dict, need: float) -> str:
     return ""
 
 
-def choose(s: Spec, cards: list, cfg: dict, jid: str, need: float):
-    """(best card or None, {card: why not})."""
+def choose(s: Spec, cards: list, cfg: dict, jid: str, need_of):
+    """(best card or None, {card: why not}); need_of(card): the VRAM the job adds there."""
     why, ok = {}, []
     for a in cards:
         if a.reserved_for and a.reserved_for != jid:
             why[a.index] = "reserved for blocked job " + a.reserved_for
             continue
-        w = fits(s, a, cfg, need)
+        w = fits(s, a, cfg, need_of(a))
         if w:
             why[a.index] = w
         else:
             ok.append(a)
     if not ok:
         return None, why
-    return min(ok, key=lambda a: (a.jobs + a.foreign_procs, a.avail(cfg["headroom_gb"]) - need)), why
+    return min(ok, key=lambda a: (a.jobs + a.foreign_procs, a.avail(cfg["headroom_gb"]) - need_of(a))), why
 
 
 class Dispatcher:
@@ -114,7 +115,8 @@ class Dispatcher:
         self.children, self.cpu_prev, self.cpu_win, self.idle_since = {}, {}, {}, {}
         self.hist, self.last, self.cpu_info, self.mem = {}, {}, {}, dict(limit=0.0, used=0.0, line=0.0, source="none")
         self.margin = float("inf")
-        self.usage_t = self.prune_t = self.lowmem_t = 0.0
+        self.usage_t = self.prune_t = self.lowmem_t = self.conc_t = 0.0
+        self.conc = {}                                 # B.conc_shares of usage.jsonl, refreshed every conc_every_s
         self.mask = None
         self.stopping, self.started = False, 0
         for sub in ("inbox", "cancel", "retarget", "jobs"):
@@ -385,7 +387,8 @@ class Dispatcher:
         mask = self.card_mask(cs)
         cards = {c.index: Acct(c.index, c.total_gb, c.used_gb, c.util) for c in cs if mask is None or c.index in mask}
         per_pid = be.usage()
-        ours, on_card = set(), {}
+        ours, on_card, groups = set(), {}, {}
+        conc = self.conc if cfg["trust_measured"] and cfg.get("conc") else {}
         for j in self.jobs("running"):
             mem, g = set(live.get(j["id"], [])), j.get("gpu")
             ours |= mem
@@ -395,15 +398,33 @@ class Dispatcher:
             act = sum(v for (cg, p), v in per_pid.items() if cg == g and p in mem)
             j["vram_now"], j["vram_peak"] = round(act, 2), max(float(j.get("vram_peak") or 0), round(act, 2))
             known = B.known_caps(self.hist, s, cfg["hist_min_n"])
-            own = B.vram_charge(j, now, known, cfg["trust_measured"], B.hist_max(self.hist, s), cfg["settle_s"])
+            seen = B.hist_max(self.hist, s)
+            own = B.vram_charge(j, now, known, cfg["trust_measured"], seen, cfg["settle_s"])
             j["vram_booked"] = round(max(act, own), 1)
-            a.pool_gb += j["vram_booked"]
+            j.pop("vram_conc", None)
+            if conc and B.conc_eligible(s, conc, seen, j["vram_peak"]):
+                groups.setdefault((g, B.hist_key(s)), []).append((j.get("t0", 0), j, act, own))
+            else:
+                a.pool_gb += j["vram_booked"]
             a.foreign_gb -= act
             a.jobs += 1
             a.exclusive = a.exclusive or bool(s.get("exclusive"))
             if s.get("tag"):
                 a.tags[s["tag"]] = a.tags.get(s["tag"], 0) + 1
             on_card.setdefault(g, []).append(j)
+        for (g, k), js in groups.items():              # same-key jobs on a card: booked together
+            a, info = cards[g], conc[k]
+            js.sort(key=lambda x: x[0])
+            inside, rest = js[:info["n_max"] + 1], js[info["n_max"] + 1:]
+            a.pool_gb += sum(x[1]["vram_booked"] for x in rest)
+            act, own_sum = sum(x[2] for x in inside), sum(x[1]["vram_booked"] for x in inside)
+            own_max = max(x[3] for x in inside)
+            booked = B.conc_group(len(inside), act, own_sum, own_max, info["share"], cfg["conc_margin"])
+            a.pool_gb += booked
+            a.conc[k] = dict(m=len(inside), act=round(act, 1), own_sum=round(own_sum, 1), own_max=round(own_max, 1),
+                             booked=booked)
+            for x in inside:
+                x[1]["vram_booked"], x[1]["vram_conc"] = round(booked / len(inside), 1), k
         for g, a in cards.items():
             a.foreign_gb = max(0.0, a.foreign_gb + a.used_gb)
             a.foreign_procs = len({p for (cg, p) in per_pid if cg == g and p not in ours})
@@ -460,6 +481,7 @@ class Dispatcher:
 
     def admit(self, cards: dict) -> None:
         cfg, now, trust = self.c, time.time(), self.c["trust_measured"]
+        conc = self.conc if trust and cfg.get("conc") else {}
         idle = self.idle_cards(cards, now)
         cpu_used, taken, pin_load, young = 0.0, set(), Counter(), 0.0
         for j in self.jobs("running"):
@@ -494,7 +516,11 @@ class Dispatcher:
             known = B.known_caps(self.hist, j["spec"], cfg["hist_min_n"]) if trust else {}
             n_cpu = max(1, min(max(s.cpu, 1), int(known.get("cpu", max(s.cpu, 1)) + 0.999)))
             ram = B.ram_need(j["spec"], known, B.hist_max(self.hist, j["spec"], "ram"), cfg["ram_default_gb"])
-            v_need = B.vram_need(j["spec"], known, trust, B.hist_max(self.hist, j["spec"]))
+            seen = B.hist_max(self.hist, j["spec"])
+            v_need = B.vram_need(j["spec"], known, trust, seen)
+            kc = B.hist_key(j["spec"]) if conc and B.conc_eligible(j["spec"], conc, seen) else None
+            need_of = ((lambda c, kc=kc, v=v_need: B.conc_add(c.conc.get(kc), conc[kc], v, cfg["conc_margin"])) if kc
+                       else (lambda c, v=v_need: v))
             soft = "CPU %.0f + %d cores > budget %.0f" % (cpu_used, n_cpu, budget) if cpu_used + n_cpu > budget else ""
             hard = ("memory %.0f + %.0f young + %.0f GB > line %.0f GB (%s)" % (used, young, ram, line, self.mem["source"])
                     if line and used + young + ram > line else "")
@@ -512,7 +538,7 @@ class Dispatcher:
                         j["never"] = True
                         self.log("never_fits", id=j["id"], name=s.name, need=v_need, largest=top)
                     continue
-                a, reasons = choose(replace(s, vram_gb=v_need), idle if soft else pool, cfg, j["id"], v_need)
+                a, reasons = choose(replace(s, vram_gb=v_need), idle if soft else pool, cfg, j["id"], need_of)
                 if a is None:
                     self.set_why(j, soft or "; ".join("card %s: %s" % kv for kv in sorted(reasons.items())) or "no card")
                     j.setdefault("t_blocked", now)
@@ -534,14 +560,21 @@ class Dispatcher:
                     continue
             if soft:
                 self.log("admit_idle", id=j["id"], name=s.name, card=a.index, blocked=soft)
-            j["vram_booked"], j["ram_booked"] = round(v_need, 1) if gpu_job else 0.0, round(ram, 1)
+            add = need_of(a) if a is not None else 0.0
+            j["vram_booked"], j["ram_booked"] = round(add, 1), round(ram, 1)
             if not self.launch(j, s, a.index if a else None, cpus):
                 continue
             starts[gpu_job] += 1
             self.started += 1
             if a is not None:
                 a.jobs += 1
-                a.pool_gb += v_need if not s.exclusive else a.total_gb
+                a.pool_gb += add if not s.exclusive else a.total_gb
+                if kc:
+                    gr = a.conc.get(kc) or dict(m=0, act=0.0, own_sum=0.0, own_max=0.0, booked=0.0)
+                    if gr["m"] < conc[kc]["n_max"] + 1:
+                        a.conc[kc] = dict(gr, m=gr["m"] + 1, own_sum=round(gr["own_sum"] + v_need, 1),
+                                          own_max=max(gr["own_max"], v_need), booked=round(gr["booked"] + add, 1))
+                    j["vram_conc"] = kc
                 a.exclusive = a.exclusive or s.exclusive
                 if s.tag:
                     a.tags[s.tag] = a.tags.get(s.tag, 0) + 1
@@ -579,7 +612,8 @@ class Dispatcher:
             for var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS"):     # thread pools sized to the cores booked
                 if var not in (s.env or {}):
                     env[var] = str(s.cpu)
-        env.update(CUDA_VISIBLE_DEVICES="" if g is None else str(g), PINKA_JOB_ID=jid, PINKA_JOB_DIR=str(d),
+        env.update(CUDA_DEVICE_ORDER="PCI_BUS_ID",                  # CUDA numbers cards as the driver (and we) do
+                   CUDA_VISIBLE_DEVICES="" if g is None else str(g), PINKA_JOB_ID=jid, PINKA_JOB_DIR=str(d),
                    PINKA_LOG_DIR=str(ld), PINKA_GPU="" if g is None else str(g), PINKA_TRY=str(k), PINKA_CPUS=cpus,
                    PINKA_RC=str(d / ("rc.%d" % k)), PINKA_TOKEN="%s/%d/%d" % (jid, k, time.time_ns()),
                    PINKA_HOME=str(self.dir), PYTHONUNBUFFERED="1")
@@ -648,7 +682,7 @@ class Dispatcher:
         atomic_json(self.dir / "state.json", self.st)
         atomic_json(self.dir / "status.json", dict(
             t=time.time(), pid=os.getpid(), cfg=self.c, cards={g: asdict(a) for g, a in self.last.items()},
-            cpu=self.cpu_info, mem=self.mem, idle={g: round(time.time() - t) for g, t in self.idle_since.items()},
+            cpu=self.cpu_info, mem=self.mem, conc=self.conc, idle={g: round(time.time() - t) for g, t in self.idle_since.items()},
             counts={s: len(self.jobs(s)) for s in ("queued", "running", "done", "failed", "cancelled")}))
 
     def round(self) -> None:
@@ -657,6 +691,7 @@ class Dispatcher:
         live, rows = self.reap(host.processes())
         self.measure(live, rows)
         self.hist = read_json(self.dir / "history.json", {}) or {}
+        self.refresh_conc()
         self.read_memory()
         self.guard_ram()
         cards = self.account(live)
@@ -670,6 +705,28 @@ class Dispatcher:
         self.usage_line()
         self.prune()
         self.save()
+
+    def refresh_conc(self) -> None:
+        """Re-learn the same-key shares from the last conc_hours of usage.jsonl every conc_every_s (event `conc`)."""
+        now, cfg = time.time(), self.c
+        if not cfg.get("conc") or now - self.conc_t < cfg["conc_every_s"]:
+            return
+        self.conc_t = now
+        lines = []
+        try:
+            with (self.dir / "usage.jsonl").open() as f:
+                for ln in f:
+                    try:
+                        x = json.loads(ln)
+                    except ValueError:
+                        continue
+                    if x.get("t", 0) >= now - cfg["conc_hours"] * 3600:
+                        lines.append(x)
+        except OSError:
+            pass
+        self.conc = B.conc_shares(lines, list(self.st["jobs"].values()), now, cfg["conc_min"], cfg["conc_q"])
+        if self.conc:
+            self.log("conc", shares={k: [v["share"], v["n_max"]] for k, v in sorted(self.conc.items())})
 
     def poll_s(self) -> float:
         thin = self.margin < 2 * self.ram_stop_gb()

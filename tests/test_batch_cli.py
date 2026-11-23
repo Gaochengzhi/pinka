@@ -77,3 +77,14 @@ def test_run_batch_reports_jobs_that_can_never_start(tmp_path):
     path = write(tmp_path, [{"name": "huge", "cmd": "true", "vram_gb": 40}, {"name": "small", "cmd": "true"}])
     assert run_batch(path, cfg=CFG, gpu=G.Fake("1x24"), out=out) == 1
     assert "never fits" in out.getvalue() and "small" in out.getvalue()
+
+
+def test_cli_history_shows_shares(tmp_path, capsys):
+    from pinka import booking as B
+    sd = tmp_path / "s"
+    sd.mkdir()
+    B.hist_record(sd / "history.json", {"name": "ev-1"}, vram_gb=3.0, cores=1.0)
+    (sd / "status.json").write_text(json.dumps(dict(t=0, conc={"ev": dict(share=2.5, n_max=3, by_n={})})))
+    cli.main(["--state-dir", str(sd), "history"])
+    out = capsys.readouterr().out
+    assert "ev" in out and "2.5" in out and "3.0/3.0" in out

@@ -164,3 +164,71 @@ def ram_reserve(j: dict, now: float, need: float, young_s: float = 300.0) -> flo
     if age >= young_s:
         return 0.0
     return max(0.0, need - float(j.get("rss_now") or 0)) * (1.0 - max(age, 0.0) / young_s)
+
+
+# ------------------------------------------------------------------------------------------------ same-key groups
+# Jobs of one history key that share a card rarely peak at the same moment. From usage.jsonl the dispatcher learns,
+# per key, the VRAM that n such jobs together used on a card (p99 over card-minutes, divided by n); m of them on a
+# card then book together max(what they use now, min(the sum of their own bookings, max(m x margin x share, the
+# largest own booking))), for m up to n_max + 1 (the largest count measured, plus one). Further jobs book their own.
+def _quantile(xs: list, q: float) -> float:
+    xs = sorted(xs)
+    return xs[min(len(xs) - 1, max(0, math.ceil(q * len(xs)) - 1))]
+
+
+def conc_shares(lines: list, jobs, now: float, min_n: int = 30, q: float = 0.99) -> dict:
+    """{key: {share, n_max, by_n: {n: [card-minutes, q-quantile of used / n]}}}. `lines`: usage.jsonl records (t,
+    cards {g: [util, GB used, GB booked, jobs]}); `jobs`: job records. A sample is a card-minute whose jobs were n >= 2
+    pool jobs of one key, all running from 30 s before to 30 s after it; its value is the card's VRAM used / n (used
+    includes processes outside the pool, so it errs high). Only counts n with >= min_n samples are trusted; share is
+    the largest of their quantiles (the conservative one)."""
+    if not lines:
+        return {}
+    t_lo, per = min(ln["t"] for ln in lines) - 60, {}
+    for j in jobs:
+        s, g, t0 = j["spec"], j.get("gpu"), j.get("t0")
+        if g is None or not t0 or not is_gpu(s) or s.get("exclusive"):
+            continue
+        t1 = now if j["state"] == "running" else j.get("t1") or t0
+        if t1 >= t_lo:
+            per.setdefault(str(g), []).append((t0, t1, hist_key(s)))
+    by = {}
+    for g, iv in per.items():
+        iv.sort()
+        i, on = 0, []
+        for ln in sorted((x for x in lines if g in (x.get("cards") or {})), key=lambda x: x["t"]):
+            t, c = ln["t"], ln["cards"][g]
+            while i < len(iv) and iv[i][0] <= t - 30:
+                on.append(iv[i])
+                i += 1
+            on = [x for x in on if x[1] >= t + 30]
+            if len(c) < 4 or c[3] < 2 or len(on) != c[3] or len({x[2] for x in on}) != 1:
+                continue
+            by.setdefault(on[0][2], {}).setdefault(len(on), []).append(float(c[1]) / len(on))
+    out = {}
+    for k, ns in by.items():
+        ok = {n: [len(xs), round(_quantile(xs, q), 2)] for n, xs in sorted(ns.items()) if len(xs) >= min_n}
+        if ok:
+            out[k] = dict(share=max(v[1] for v in ok.values()), n_max=max(ok), by_n=ok)
+    return out
+
+
+def conc_eligible(spec: dict, conc: dict, seen: float = 0.0, peak: float = 0.0) -> bool:
+    """May this job be booked in its key's group? Not when exclusive or when it broke its declaration."""
+    return (hist_key(spec) in (conc or {}) and is_gpu(spec) and not spec.get("exclusive")
+            and not vram_raised(spec, peak, seen))
+
+
+def conc_group(m: int, act: float, own_sum: float, own_max: float, share: float, margin: float) -> float:
+    """GB that m same-key jobs on one card book together."""
+    return round(max(act, min(own_sum, max(m * margin * share, own_max))), 1)
+
+
+def conc_add(group: dict, info: dict, v: float, margin: float) -> float:
+    """GB one more job of the key (own booking `v`) adds to a card whose group is `group` ({m, act, own_sum, own_max,
+    booked}, or empty): the group's growth, or `v` once the card already holds n_max + 1 of them."""
+    g = group or dict(m=0, act=0.0, own_sum=0.0, own_max=0.0, booked=0.0)
+    if g["m"] >= info["n_max"] + 1:
+        return v
+    new = conc_group(g["m"] + 1, g["act"], g["own_sum"] + v, max(g["own_max"], v), info["share"], margin)
+    return max(0.0, round(new - g["booked"], 1))

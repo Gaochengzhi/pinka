@@ -208,6 +208,11 @@ def cmd_history(a):
         print("%-28s %5d %18s %12s %12s" % (k[:28], len(v), "%.1f/%.1f" % (B._p95(v), max(v)) if v else "-",
                                          "%.1f" % max(e["cores"]) if e.get("cores") else "-",
                                          "%.1f" % max(e["ram"]) if e.get("ram") else "-"))
+    conc = (J.snapshot(a.state_dir)[1].get("conc") or {})
+    if conc:
+        print("\nsame-key groups (booked together on a card): key, share GB per job, largest measured count n_max")
+        for k, v in sorted(conc.items()):
+            print("%-28s %6.1f %4d" % (k[:28], v["share"], v["n_max"]))
     return 0
 
 

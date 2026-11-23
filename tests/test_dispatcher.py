@@ -175,6 +175,7 @@ def test_cpu_job_gets_no_card_and_env(make_pool, tmp_path):
     p.settle(a)
     env = dict(ln.split("=", 1) for ln in out.read_text().splitlines() if "=" in ln)
     assert env["CUDA_VISIBLE_DEVICES"] == "" and env["FOO"] == a and env["OMP_NUM_THREADS"] == "3"
+    assert env["CUDA_DEVICE_ORDER"] == "PCI_BUS_ID"
     assert env["PINKA_JOB_ID"] == a and env["PINKA_RC"].endswith("rc.1")
 
 
@@ -222,3 +223,38 @@ def test_daemon_lock_and_once(tmp_path):
     assert d.run(once=True) == 0
     assert json.loads((tmp_path / "status.json").read_text())["counts"]["queued"] == 0
     assert os.path.exists(tmp_path / "dispatch.lock")
+
+
+def test_same_key_jobs_book_together(make_pool):
+    import time
+    p = make_pool(cards="1x24")
+    p.d.conc, p.d.conc_t = {"ev": dict(share=3.0, n_max=3, by_n={})}, time.time()
+    ids = [p.submit(SLEEP, name="ev-%d" % i, vram_gb=10) for i in range(5)]
+    p.spin(lambda: sum(p.state(i) == "running" for i in ids) == 4)
+    p.d.round()
+    assert [p.state(i) for i in ids].count("queued") == 1                  # 13.2 booked + 10 > 22
+    assert p.d.last[0].conc["ev"]["booked"] == 13.2
+    assert {p.job(i)["vram_booked"] for i in ids if p.state(i) == "running"} == {3.3}
+
+
+def test_conc_off_books_each_job(make_pool):
+    import time
+    p = make_pool(cards="1x24", conc=False)
+    p.d.conc, p.d.conc_t = {"ev": dict(share=3.0, n_max=3, by_n={})}, time.time()
+    ids = [p.submit(SLEEP, name="ev-%d" % i, vram_gb=10) for i in range(3)]
+    p.spin(lambda: sum(p.state(i) == "running" for i in ids) == 2)
+    p.d.round()
+    assert [p.state(i) for i in ids].count("queued") == 1
+
+
+def test_refresh_conc_reads_usage(make_pool):
+    p = make_pool()
+    import time
+    now = time.time()
+    p.d.st["jobs"] = {"a%d" % i: dict(id="a%d" % i, spec=dict(name="ev-%d" % i, vram_gb=10), gpu=0, t0=now - 4000,
+                                      t1=now - 10, state="done") for i in range(2)}
+    with (p.dir / "usage.jsonl").open("w") as f:
+        for k in range(40):
+            f.write(json.dumps(dict(t=now - 3000 + 60 * k, cards={"0": [50, 6.0, 20.0, 2]})) + "\n")
+    p.d.refresh_conc()
+    assert p.d.conc["ev"]["share"] == 3.0 and p.d.conc["ev"]["n_max"] == 2
