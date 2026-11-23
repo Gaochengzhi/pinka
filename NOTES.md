@@ -91,14 +91,14 @@ comments and docstrings), plus 4 test files.
 
 ## Tests
 
-`python -m pytest`: 30 tests in about 10 s on macOS (Python 3.14 and 3.9, through `uv run --no-project --with
-pytest`). The tests use the fake GPU backend and real short shell jobs. They cover packing, spreading, measured and
-history booking, after chains, failed dependencies, retries with rc/DONE markers, custom log dirs, timeout and cancel
-stopping the whole tree, CUDA-OOM requeue, VRAM stop, never fits plus retarget, RAM admission, the RAM guard,
-exclusive jobs and tag caps, CPU jobs and the job environment, the `CUDA_VISIBLE_DEVICES` mask, `admit_idle`,
-hooks, adopting running jobs after a dispatcher restart, the daemon lock, the foreground list (checks, packing,
-chains, resume, never fits), and the CLI (submit, fanout, list). They have not yet been run on Linux: the GPU test
-below exercised the Linux paths, but not the pytest suite.
+`python -m pytest`: 30 tests in about 10 s, passed on macOS (Python 3.14 and 3.9, through `uv run --no-project
+--with pytest`) and on Linux (Ubuntu, Python 3.12, the GPU test machine below: 7 s). The tests use the fake GPU
+backend and real short shell jobs. They cover packing, spreading, measured and history booking, after chains, failed
+dependencies, retries with rc/DONE markers, custom log dirs, timeout and cancel stopping the whole tree, CUDA-OOM
+requeue, VRAM stop, never fits plus retarget, RAM admission, the RAM guard, exclusive jobs and tag caps, CPU jobs and
+the job environment, the `CUDA_VISIBLE_DEVICES` mask, `admit_idle`, hooks, adopting running jobs after a dispatcher
+restart, the daemon lock, the foreground list (checks, packing, chains, resume, never fits), and the CLI (submit,
+fanout, list).
 
 ## GPU test (2026-11-24, a 2 x RTX 3090 Linux workstation outside any pool)
 
