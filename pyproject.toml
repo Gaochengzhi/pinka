@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pinka"
+version = "0.1.0"
+description = "Pack GPU jobs onto shared cards by measured memory: a single-node job pool with VRAM/CPU/RAM booking, dependencies and retries"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+dependencies = []
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: POSIX :: Linux",
+    "Environment :: GPU :: NVIDIA CUDA",
+    "Topic :: System :: Distributed Computing",
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[project.scripts]
+pinka = "pinka.cli:main"
+
+[tool.setuptools]
+packages = ["pinka"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
