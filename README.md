@@ -4,8 +4,9 @@ Pack GPU jobs onto shared cards by measured memory. pinka is a job pool for one 
 peak VRAM, cores and RAM. A dispatcher starts every job on a card with room, so several small jobs share one card.
 Once a job has run long enough, or its name has a history, it is booked at the VRAM it actually used rather than at
 what it declared. Jobs can depend on each other (`--after`) and be retried (`--tries`). Every job gets an exit-code
-file and a DONE or ERROR marker, and the host's RAM is guarded. Python 3.9+, standard library only, no root, no
-database: the state is a directory of JSON files.
+file and a DONE or ERROR marker, and the host's RAM is guarded. Python 3.9+, standard library only (pynvml
+optional), no root, no database: the state is a directory of JSON files. Source-available under the PolyForm
+Noncommercial licence: free for noncommercial use (see Licence).
 
 The name is Mandarin *pīn kǎ* (拼卡): sharing a card, the way people share a taxi.
 
@@ -22,10 +23,12 @@ script, agent or shell can write to. If your jobs each need a whole GPU, use tas
 
 ```bash
 pip install .            # from a checkout; installs the `pinka` command
+pip install '.[nvml]'    # optional: read the cards through NVML (nvidia-ml-py) instead of calling nvidia-smi
 pinka --help
 ```
 
-Linux with NVIDIA drivers (`nvidia-smi` on `PATH`) for GPU jobs. On macOS and other systems without NVIDIA cards
+Linux with NVIDIA drivers for GPU jobs. pinka uses pynvml when it is installed, else `nvidia-smi` on `PATH`
+(config `gpu_backend`, or env `PINKA_GPU_BACKEND`, forces `nvml` or `nvidia-smi`). On macOS and other systems without NVIDIA cards
 pinka still runs CPU-only jobs, and the tests run there with a fake GPU backend.
 
 ## Five-minute quickstart
@@ -94,7 +97,7 @@ else `~/.pinka`).
 | `wait ID ... [--poll S]` | block until the jobs end; exit 0 if all are done |
 | `status` | cards (used, booked by the pool, used outside it, free), CPU and RAM budget, idle cards next to waiting jobs |
 | `usage [--hours H]` | card-hours split into computing, job running with GPU idle, queued (by cause), no work |
-| `history [--all]` | per history key: runs, VRAM p95/max, cores, RAM |
+| `history [--all]` | per history key: runs, VRAM p95/max, cores, RAM; the learned same-key shares |
 | `config` | the effective configuration |
 
 Submit flags: `--name` (default: the command's first word), `--key` (history key), `--vram GB`, `--cpu N`,
@@ -107,7 +110,8 @@ left out and the name has history, the default is p95 x 1.2 of earlier runs. A j
 Python API: `pinka.submit(cmd, name=..., vram_gb=..., after=[...]) -> id`, `pinka.wait(ids)`, `pinka.cancel(id)`,
 `pinka.retarget(id, vram_gb=...)`, `pinka.fanout(...)`.
 
-The job's environment includes `CUDA_VISIBLE_DEVICES` (its card; empty for a CPU job), `PINKA_JOB_ID`, `PINKA_GPU`,
+The job's environment includes `CUDA_VISIBLE_DEVICES` (its card; empty for a CPU job), `CUDA_DEVICE_ORDER=PCI_BUS_ID`
+(so CUDA numbers the cards as the driver and pinka do), `PINKA_JOB_ID`, `PINKA_GPU`,
 `PINKA_TRY`, `PINKA_CPUS`, `PINKA_JOB_DIR`, `PINKA_LOG_DIR` and `PINKA_HOME`. A job with `--cpu N` also gets
 `OMP_NUM_THREADS` and `MKL_NUM_THREADS` set to N unless its own env sets them. In the command and env values,
 `{gpu}`, `{id}`, `{job_dir}` and `{try}` are replaced with the job's values.
@@ -126,21 +130,29 @@ cancelled fails too. Then:
    A declaration that proved too low stops being a cap. A job measured above `1.1 x declared + 1 GB` is booked at
    `1.2 x its peak + 1 GB`, and its peak is written to history even if it fails. The next job under that key is then
    placed by what was measured.
-2. **Fitting a card.** A card has room for a job when `total - headroom - (VRAM used outside the pool) - (pool
+2. **Same-key jobs on one card are booked together.** Jobs of one key on a card rarely all peak at once. From
+   `usage.jsonl` (the last `conc_hours`, re-read every `conc_every_s`), the dispatcher learns per key how much VRAM
+   n such jobs used together on a card: the p99 over card-minutes of the card's used VRAM / n, for every n with at
+   least `conc_min` card-minutes; the key's share is the largest of these. m jobs of the key on a card then book
+   `max(what they use now, min(the sum of their own bookings, max(m x conc_margin x share, the largest own
+   booking)))`, for m up to the largest measured n plus one; further jobs book their own. Exclusive jobs and jobs
+   above their declaration never join a group. `conc: false` turns this off; `pinka history` shows the learned
+   shares.
+3. **Fitting a card.** A card has room for a job when `total - headroom - (VRAM used outside the pool) - (pool
    bookings) >= need`. Of the cards with room, the least loaded wins (fewest jobs), and best fit breaks ties.
    Spreading keeps every card busy; best fit leaves room for a large job. `--exclusive` needs an empty card and
    takes all of it, and `tag_caps` limits how many jobs with a given tag share a card.
-3. **CPU.** The CPU budget is `cpu_budget`, else the cores this process may use (affinity and cgroup quota) times
+4. **CPU.** The CPU budget is `cpu_budget`, else the cores this process may use (affinity and cgroup quota) times
    `cpu_overcommit`. A job is charged its declared cores for its first `young_s` (300 s), then 1.2 x its measured
    peak over the last 5 minutes. On Linux, `--cpu N` pins the job to N free cores. A GPU job blocked only by the CPU
    budget still starts on a card that has been idle for `idle_s`, so a card never waits on CPU bookkeeping.
-4. **RAM.** A job starts only if `used + RAM still to come from young jobs + its RAM <= ram_frac x limit`. The limit
+5. **RAM.** A job starts only if `used + RAM still to come from young jobs + its RAM <= ram_frac x limit`. The limit
    is the cgroup v2 `memory.max` if one is set, else host RAM; "used" excludes reclaimable page cache. With
    `ram_budget_gb` (or `pinka run --ram-gb`), RAM is booked against that budget instead of being measured. Each job's
    memory is its tree's private memory (RssAnon + RssShmem), so files mapped by many jobs are not charged many times.
-5. **No starvation.** A job blocked at the head of the queue for `hold_s` (15 min) reserves the card closest to
+6. **No starvation.** A job blocked at the head of the queue for `hold_s` (15 min) reserves the card closest to
    fitting it. Lower-priority jobs stop starting there until it starts.
-6. **Never fits.** A job that needs more than any allowed card offers says so in `list` ("never fits"), and `submit`
+7. **Never fits.** A job that needs more than any allowed card offers says so in `list` ("never fits"), and `submit`
    warns. Fix it with `pinka retarget ID --vram GB`, or use `--exclusive` for a whole card.
 
 The dispatcher also watches running jobs:
@@ -221,15 +233,16 @@ A hook that raises is logged as `hook_error` and otherwise ignored.
 ## Configuration
 
 `pinka config` prints every key and its value. The main ones: `poll_s`, `headroom_gb` (2), `cards` (allowed card
-indices), `gpu_backend` (`nvidia-smi`, `none`, `fake:2x24`), `settle_s`, `trust_measured` (false: always book the
+indices), `gpu_backend` (`auto`, `nvml`, `nvidia-smi`, `none`, `fake:2x24`), `settle_s`, `trust_measured` (false: always book the
 declaration), `cpu_budget`, `cpu_overcommit`, `pin_cpus`, `memory_source` (`auto`, `cgroup`, `host`, `none`),
-`ram_budget_gb`, `ram_frac`, `ram_stop_gb`, `oom_retries`, `kill_retries`, `ram_retries`, `tag_caps`, `keep_days`,
-`hooks`.
+`ram_budget_gb`, `ram_frac`, `ram_stop_gb`, `oom_retries`, `kill_retries`, `ram_retries`, `tag_caps`, `conc`,
+`conc_margin`, `conc_hours`, `conc_min`, `keep_days`, `hooks`. Configuration is JSON so that the runtime needs only
+the standard library of Python 3.9.
 
 ## Limitations
 
 - One machine. There is no network protocol; several users can share a dispatcher only through a shared directory.
-- NVIDIA only (via `nvidia-smi`). VRAM per process comes from `nvidia-smi --query-compute-apps`. In containers whose
+- NVIDIA only (NVML or `nvidia-smi`). VRAM per process comes from NVML's compute-process list (`nvidia-smi --query-compute-apps`). In containers whose
   PID namespace hides host PIDs, the per-job numbers can be missing; card totals still work.
 - The dispatcher polls (default every 10 s): a job starts up to one round after it becomes ready.
 - MIG and MPS are not modelled. A card is one memory pool.
@@ -241,9 +254,16 @@ declaration), `cpu_budget`, `cpu_overcommit`, `pin_cpus`, `memory_source` (`auto
 ## Development
 
 ```bash
-python -m pytest           # about 10 s; fake GPUs, real short shell jobs; Linux or macOS
+python -m pytest           # about 12 s; fake GPUs and a fake pynvml, real short shell jobs; Linux or macOS
 ```
 
 ## Licence
 
-MIT (tentative; see LICENSE).
+pinka is source-available, not open source. It is licensed under the
+[PolyForm Noncommercial License 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0) (LICENSE).
+
+- **Noncommercial use is free**: personal use, research, study, hobby projects, and use by charities, educational
+  and public research institutions and government bodies, as the licence defines them.
+- **Commercial use needs a licence from the copyright holder**. Commercial licences are available on request.
+
+Copyright (c) 2026 <OWNER TBD>.

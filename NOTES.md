@@ -1,25 +1,25 @@
 # NOTES
 
 Working notes for the first version (0.1.0, 2026-11-24): what was ported, what was dropped, the decisions taken,
-how it was tested, and the questions that are still open.
+how it was tested, and the user's decisions on the open questions.
 
 ## Source
 
 pinka is a slimmed port of a private single-node GPU pool. That pool ran about 53,000 jobs a month on a shared
 multi-GPU box. It had 3,582 lines in 8 modules: dispatcher, CLI, host probe, page-cache trimmer, disk manager,
-process trees, capacity planner, worker profiles. pinka has 1,924 lines in 10 modules (1,517 without blank lines,
-comments and docstrings), plus 4 test files.
+process trees, capacity planner, worker profiles. pinka has 2,122 lines in 11 files (1,674 without blank lines,
+comments and docstrings), plus 5 test files.
 
 | Module | Lines | Role |
 |:--|--:|:--|
-| `dispatcher.py` | ~730 | rounds: ingest, reap, measure, guards, admission, launch, usage, foreground loop |
+| `dispatcher.py` | ~790 | rounds: ingest, reap, measure, guards, admission, launch, usage, foreground loop |
 | `cli.py` | ~300 | argparse front end and the read-only reports |
 | `host.py` | ~275 | process table (`/proc`, or `ps` elsewhere), owned trees, cores, memory |
-| `booking.py` | ~165 | pure functions: history keys, measured booking of VRAM / CPU / RAM |
+| `booking.py` | ~235 | pure functions: history keys, measured booking of VRAM / CPU / RAM, same-key groups |
 | `jobs.py` | ~135 | Spec, submit / cancel / retarget / fanout / wait through spool files |
 | `batch.py` | ~95 | `pinka run`: foreground mode for a JSON job list |
-| `gpu.py` | ~95 | `nvidia-smi` backend (cached), fake backend, no-GPU backend |
-| `config.py` | ~85 | state dir, defaults, JSON helpers |
+| `gpu.py` | ~150 | NVML backend (optional pynvml), `nvidia-smi` backend, both cached; fake and no-GPU backends |
+| `config.py` | ~90 | state dir, defaults, JSON helpers |
 | `hooks.py` | ~45 | site hooks: job_env, try_end, low_memory |
 
 ## Ported (kept)
@@ -46,6 +46,11 @@ comments and docstrings), plus 4 test files.
 - Head-of-queue reservation after `hold_s`, so a large job is not starved.
 - Process trees by (pid, start time) plus an environment token; pidfd signalling where available; nothing is killed
   by name pattern; resources are freed only when the whole tree is gone. A restarted dispatcher adopts running jobs.
+- Same-key group booking (added back after the first draft, at the user's request): m jobs of one history key on a
+  card book `max(used now, min(sum of own bookings, max(m x 1.1 x share, largest own booking)))`, the share learned
+  from `usage.jsonl` (p99 of card VRAM / n over card-minutes with n same-key jobs, >= 30 card-minutes per n, last
+  72 h, re-learned every 30 min), for m up to n_max + 1. Same rule and constants as the old pool; `conc: false`
+  turns it off. `pinka history` shows the learned shares.
 - `events.jsonl`, `usage.jsonl` (one line a minute) and `usage` / `status` / `history` reports; "why it waited"
   accumulated per cause (`waited` in the launch event).
 
@@ -60,7 +65,6 @@ comments and docstrings), plus 4 test files.
 | `--preflight`, static command check, serial-chain hints | conveniences tied to one team's habits |
 | `--pin-strict` and `auto_retarget` (widening `--gpus` onto idle cards) | rare (0.2 %); `--gpus` is now strict |
 | `--threads`, `--max-rss`, `--train` | almost unused; `--train` became the generic `--tag` with `tag_caps` |
-| Concurrent same-key booking (p99 VRAM of k same-key jobs sharing a card, from `usage.jsonl`) | about 100 lines; per-job measured booking covers most of the gain. Open question 3 |
 | NUMA-local core choice | small gain, more probing code; pinning uses free cores in affinity order |
 | `drain` cancel mode | tied to one simulator runner |
 | Kill-report and memory-high counters in `usage` | specific to the container platform |
@@ -87,18 +91,33 @@ comments and docstrings), plus 4 test files.
   retried once by default; set `"tries": 2`); markers are `jobs.pinka/jobs/<name>/DONE`, not `<name>.done`; the
   room on a card is the measured-booking rule, not `min(total - booked, free - young)`; RAM is a budget only with
   `--ram-gb`, otherwise it is measured.
+- **NVML backend.** `gpu_backend: "auto"` (the default) uses pynvml (`pip install 'pinka[nvml]'`, package
+  nvidia-ml-py) when it imports and initialises, else `nvidia-smi`; `nvml` / `nvidia-smi` force one (config or env
+  `PINKA_GPU_BACKEND`). It reads memory with `nvmlMemory_v2`, whose `used` leaves out driver-reserved memory as
+  nvidia-smi does (v1 reports ~0.45 GB "used" on an idle 3090, which would count as a foreign process).
+- **CUDA_DEVICE_ORDER=PCI_BUS_ID** is set for every job. Card indices come from the driver (PCI-bus order); CUDA's
+  default order is fastest-first, so on a host with mixed cards `CUDA_VISIBLE_DEVICES=1` could have picked another
+  card than the one booked. The old pool did not set it.
 - `headroom_gb` defaults to 2 (was 4, sized for 80 GB cards); `poll_s` to 10 (was 20); `ram_default_gb` to 1 (was 8).
 
 ## Tests
 
-`python -m pytest`: 30 tests in about 10 s, passed on macOS (Python 3.14 and 3.9, through `uv run --no-project
---with pytest`) and on Linux (Ubuntu, Python 3.12, the GPU test machine below: 7 s). The tests use the fake GPU
+`python -m pytest`: 39 tests in about 12 s, passed on macOS (Python 3.14 and 3.9, through `uv run --no-project
+--with pytest`). The first 30 also passed on Linux (Ubuntu, Python 3.12, the GPU test machine below: 7 s); the 9
+added later (same-key groups, NVML with a fake pynvml module, nvidia-smi parsing, history output) are pure Python and
+were run on macOS only. The tests use the fake GPU
 backend and real short shell jobs. They cover packing, spreading, measured and history booking, after chains, failed
 dependencies, retries with rc/DONE markers, custom log dirs, timeout and cancel stopping the whole tree, CUDA-OOM
 requeue, VRAM stop, never fits plus retarget, RAM admission, the RAM guard, exclusive jobs and tag caps, CPU jobs and
 the job environment, the `CUDA_VISIBLE_DEVICES` mask, `admit_idle`, hooks, adopting running jobs after a dispatcher
 restart, the daemon lock, the foreground list (checks, packing, chains, resume, never fits), and the CLI (submit,
-fanout, list).
+fanout, list, history), same-key group booking (learning shares from usage lines, group and add arithmetic, 4 jobs
+of 10 GB declared sharing a 24 GB card and a fifth waiting, `conc: false`), and the GPU backends (NVML with a fake
+pynvml, auto-detection and forcing, nvidia-smi parsing).
+
+Packaging: `python -m build` (sdist and wheel) in a throwaway venv, then `twine check`: both PASSED (metadata 2.4,
+`License-Expression: PolyForm-Noncommercial-1.0.0`, LICENSE included). The venv, `dist/`, `build/` and the egg-info
+were deleted; nothing was uploaded.
 
 ## GPU test (2026-11-24, a 2 x RTX 3090 Linux workstation outside any pool)
 
@@ -130,27 +149,31 @@ CPU job after that. All three started in the same second on card 1, pinned to co
 job (`CUDA_VISIBLE_DEVICES` empty) followed. The run exited 0 after 28 s with all 5 done. A rerun started nothing and
 printed the same table.
 
+**Test 3: NVML backend** (same machine, both cards idle before; throwaway venv with nvidia-ml-py in a scratch dir,
+deleted after). `gpu.backend("auto")` picked `Nvml`. With two 1 GB jobs running on card 1 through
+`CUDA_VISIBLE_DEVICES=1 pinka run`, NVML and nvidia-smi gave the same per-process VRAM (1.29 GB each, same pids), and
+the jobs' recorded peaks were 1.29 GB. After switching to `nvmlMemory_v2`, idle-card `used` matched nvidia-smi
+(0.014 vs 0.015 GB). The CPU job in that list saw `CUDA_DEVICE_ORDER=PCI_BUS_ID` and an empty
+`CUDA_VISIBLE_DEVICES`. The cards were back to 15 MiB with no process left.
+
 Commands: the two scripts were `run.sh` (daemon, `pinka submit` x 6, `pinka list` / `status` at t+15 s and t+50 s,
 `pinka wait`, then `events.jsonl` filtered to launch / end / retry) and an inline `pinka run`. Both were deleted with
 the scratch directory; their full output is summarised above.
 
-## Open questions for the user
+## Decisions on the open questions (user, 2026-11-24)
 
-1. **Licence and copyright holder.** The LICENSE file is MIT, marked tentative, with "the pinka contributors" as
-   holder. Please confirm, or give the name to use.
-2. **Should the release chain move to `pinka run`?** pinka's foreground mode covers the standalone runner (the
-   differences are listed above). The frozen release repository was not touched. Should its runner be replaced by a
-   pinka dependency in a later release, or stay as it is?
-3. **Concurrent same-key booking.** The old pool booked k jobs of one key on a card together, at the measured p99 of
-   their combined use, which fits more jobs than per-job peaks do. pinka 0.1 leaves it out. Should it come back
-   (about 100 lines), on by default?
-4. **Config format.** Config is JSON (`config.json`), because `tomllib` only exists from Python 3.11 and the runtime
-   is stdlib-only from 3.9. Is TOML wanted anyway (it would need 3.11+ or an optional dependency)?
-5. **pynvml.** Only `nvidia-smi` is implemented. An optional NVML backend would avoid a subprocess call every
-   `smi_age_s`. Is it worth adding?
-6. **The live box.** pinka has not been run on the shared box, by design: it must not book cards outside the
-   running pool. Moving the box from the old pool to pinka would need a cut-over plan: drain the old pool, keep its
-   history (the `history.json` format is compatible apart from key names), and port the page-cache trimmer and
-   temp-disk logic as hooks.
-7. **Name and remote.** No GitHub remote was created. Is "pinka" final, and under which account should it be
-   published?
+1. **Licence: PolyForm Noncommercial 1.0.0.** LICENSE holds the exact upstream text (checked by diff against the
+   upstream 1.0.0 file) after two `Required Notice:` lines: the copyright placeholder "Copyright (c) 2026 <OWNER
+   TBD>" (the user sets the company name) and "commercial licences on request". `pyproject.toml` declares
+   `license = "PolyForm-Noncommercial-1.0.0"` (PEP 639, setuptools >= 77). This makes pinka **source-available,
+   not OSI open source**: noncommercial use is free, commercial use needs a licence from the owner. The README says
+   so in its Licence section, and does not call pinka open source.
+2. **Same-key group booking: added back** (above).
+3. **Config stays JSON.**
+4. **Optional pynvml backend: added** (above), auto-detected, with a switch to force either backend.
+5. **No cut-over plan for the shared box for now; GitHub account undecided.** No remote was created; nothing was
+   pushed or uploaded.
+6. **Version 0.1.0; build and `twine check` pass** (above).
+
+Still open: the copyright holder's name (placeholder in LICENSE and README), and whether the release chain's runner
+should later move to `pinka run`.

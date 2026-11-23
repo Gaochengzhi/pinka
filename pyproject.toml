@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,7 +7,8 @@ name = "pinka"
 version = "0.1.0"
 description = "Pack GPU jobs onto shared cards by measured memory: a single-node job pool with VRAM/CPU/RAM booking, dependencies and retries"
 readme = "README.md"
-license = {text = "MIT"}
+license = "PolyForm-Noncommercial-1.0.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.9"
 dependencies = []
 classifiers = [
@@ -18,6 +19,7 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
+nvml = ["nvidia-ml-py"]
 test = ["pytest"]
 
 [project.scripts]
