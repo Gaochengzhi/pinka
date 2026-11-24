@@ -3,7 +3,7 @@
 Every round: read submissions, cancels and retargets; reap jobs whose process tree is gone (retry, requeue or finish
 them); measure what running jobs use (VRAM per process, cores, private memory); stop a job that broke its declaration
 when its card or the host runs out; start queued jobs, highest priority first, on the card with room that is least
-loaded (fewest jobs), best fit breaking ties. README.md describes the rules.
+loaded (fewest jobs), best fit breaking ties. AGENTS.md describes the rules.
 """
 from __future__ import annotations
 

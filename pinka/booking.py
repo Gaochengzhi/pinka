@@ -1,6 +1,6 @@
 """What a job is booked at: VRAM, cores and RAM from its declaration, its own measurements and the history of earlier
 runs under the same history key. A declaration is an upper bound; what the same job measured is the estimate. A
-declaration that proved too low stops being a cap. README.md, "How packing and booking work", has the rules in prose.
+declaration that proved too low stops being a cap. AGENTS.md, "How packing and booking work", has the rules in prose.
 """
 from __future__ import annotations
 

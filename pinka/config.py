@@ -20,7 +20,7 @@ DEFAULTS = dict(
     headroom_gb=2.0,        # VRAM kept free on every card
     max_starts=4,           # jobs started per round (GPU and CPU jobs counted apart)
     hold_s=900.0,           # a job blocked this long at the head of the queue reserves the card closest to fitting it
-    idle_s=120.0,           # a card with no job for this long is idle (see admit_idle in README)
+    idle_s=120.0,           # a card with no job for this long is idle (see admit_idle in AGENTS.md)
     idle_vram_gb=1.0,       # ... and uses at most this much VRAM outside the pool
     trust_measured=True,    # book by measured peaks (False: always book the declaration)
     settle_s=600.0,         # a job without history books its declaration this long, then its own measured peak
@@ -41,7 +41,7 @@ DEFAULTS = dict(
     kill_retries=2,         # requeues after the job's root dies of SIGKILL without a pool stop (host OOM killer)
     over_stop_free_gb=1.0,  # a job above its VRAM declaration on a card with less free than this is stopped (0: never)
     tag_caps={},            # per-card caps by job tag, e.g. {"train": 2}
-    conc=True,              # book same-key jobs on a card together, by their measured concurrent use (README)
+    conc=True,              # book same-key jobs on a card together, by their measured concurrent use (AGENTS.md)
     conc_margin=1.1,
     conc_hours=72.0,        # ... learned from this much of usage.jsonl
     conc_min=30,            # ... card-minutes at one job count before that count is trusted
@@ -50,7 +50,7 @@ DEFAULTS = dict(
     low_memory_gb=0.0,      # call the low_memory hook while the margin under the RAM line is below this (0: never)
     low_memory_every_s=30.0,
     keep_days=14.0,         # finished jobs leave state.json after this many days (their jobs/<id>/ folder stays)
-    hooks={},               # {"job_env": "module:function", "try_end": ..., "low_memory": ...}; see README, Hooks
+    hooks={},               # {"job_env": "module:function", "try_end": ..., "low_memory": ...}; see AGENTS.md, Hooks
 )
 FINAL = ("done", "failed", "cancelled")
 

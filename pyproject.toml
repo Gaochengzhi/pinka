@@ -10,6 +10,7 @@ readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.9"
+authors = [{ name = "Gao Chengzhi" }]
 dependencies = []
 classifiers = [
     "Programming Language :: Python :: 3",
@@ -17,6 +18,11 @@ classifiers = [
     "Environment :: GPU :: NVIDIA CUDA",
     "Topic :: System :: Distributed Computing",
 ]
+
+[project.urls]
+Homepage = "https://github.com/Gaochengzhi/pinka"
+Repository = "https://github.com/Gaochengzhi/pinka"
+Issues = "https://github.com/Gaochengzhi/pinka/issues"
 
 [project.optional-dependencies]
 nvml = ["nvidia-ml-py"]
