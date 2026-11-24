@@ -5,8 +5,7 @@ peak VRAM, cores and RAM. A dispatcher starts every job on a card with room, so 
 Once a job has run long enough, or its name has a history, it is booked at the VRAM it actually used rather than at
 what it declared. Jobs can depend on each other (`--after`) and be retried (`--tries`). Every job gets an exit-code
 file and a DONE or ERROR marker, and the host's RAM is guarded. Python 3.9+, standard library only (pynvml
-optional), no root, no database: the state is a directory of JSON files. Source-available under the PolyForm
-Noncommercial licence: free for noncommercial use (see Licence).
+optional), no root, no database: the state is a directory of JSON files. MIT licence.
 
 The name is Mandarin *pīn kǎ* (拼卡): sharing a card, the way people share a taxi.
 
@@ -259,11 +258,4 @@ python -m pytest           # about 12 s; fake GPUs and a fake pynvml, real short
 
 ## Licence
 
-pinka is source-available, not open source. It is licensed under the
-[PolyForm Noncommercial License 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0) (LICENSE).
-
-- **Noncommercial use is free**: personal use, research, study, hobby projects, and use by charities, educational
-  and public research institutions and government bodies, as the licence defines them.
-- **Commercial use needs a licence from the copyright holder**. Commercial licences are available on request.
-
-Copyright (c) 2026 Gao Chengzhi.
+MIT (LICENSE). Copyright (c) 2026 Gao Chengzhi.

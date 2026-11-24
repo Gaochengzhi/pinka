@@ -116,7 +116,7 @@ of 10 GB declared sharing a 24 GB card and a fifth waiting, `conc: false`), and 
 pynvml, auto-detection and forcing, nvidia-smi parsing).
 
 Packaging: `python -m build` (sdist and wheel) in a throwaway venv, then `twine check`: both PASSED (metadata 2.4,
-`License-Expression: PolyForm-Noncommercial-1.0.0`, LICENSE included). The venv, `dist/`, `build/` and the egg-info
+`License-Expression: MIT`, LICENSE included). The venv, `dist/`, `build/` and the egg-info
 were deleted; nothing was uploaded.
 
 ## GPU test (2026-11-24, a 2 x RTX 3090 Linux workstation outside any pool)
@@ -162,18 +162,14 @@ the scratch directory; their full output is summarised above.
 
 ## Decisions on the open questions (user, 2026-11-24)
 
-1. **Licence: PolyForm Noncommercial 1.0.0.** LICENSE holds the exact upstream text (checked by diff against the
-   upstream 1.0.0 file) after two `Required Notice:` lines: the copyright placeholder "Copyright (c) 2026 <OWNER
-   TBD>" (the user sets the company name) and "commercial licences on request". `pyproject.toml` declares
-   `license = "PolyForm-Noncommercial-1.0.0"` (PEP 639, setuptools >= 77). This makes pinka **source-available,
-   not OSI open source**: noncommercial use is free, commercial use needs a licence from the owner. The README says
-   so in its Licence section, and does not call pinka open source.
+1. **Licence: MIT**, copyright Gao Chengzhi (user, 2026-11-24; replaced the PolyForm Noncommercial 1.0.0 set the
+   night before). `pyproject.toml` declares `license = "MIT"`.
 2. **Same-key group booking: added back** (above).
 3. **Config stays JSON.**
 4. **Optional pynvml backend: added** (above), auto-detected, with a switch to force either backend.
-5. **No cut-over plan for the shared box for now; GitHub account undecided.** No remote was created; nothing was
-   pushed or uploaded.
+5. **No cut-over plan for the shared box for now.** Published under the personal GitHub account (private until the
+   user tidies it); PyPI upload pending a token.
 6. **Version 0.1.0; build and `twine check` pass** (above).
 
-Still open: the copyright holder's name (placeholder in LICENSE and README), and whether the release chain's runner
+Still open: whether the release chain's runner
 should later move to `pinka run`.
