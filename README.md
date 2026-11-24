@@ -266,4 +266,4 @@ pinka is source-available, not open source. It is licensed under the
   and public research institutions and government bodies, as the licence defines them.
 - **Commercial use needs a licence from the copyright holder**. Commercial licences are available on request.
 
-Copyright (c) 2026 <OWNER TBD>.
+Copyright (c) 2026 Gao Chengzhi.
