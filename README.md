@@ -5,8 +5,8 @@
 <p align="center"><b>Pack GPU jobs onto shared cards by the memory they actually use.</b></p>
 
 <p align="center">
-  <a href="https://pypi.org/project/pinka/"><img src="https://img.shields.io/pypi/v/pinka" alt="PyPI"></a>
-  <a href="https://pypi.org/project/pinka/"><img src="https://img.shields.io/pypi/pyversions/pinka" alt="Python"></a>
+  <a href="https://pypi.org/project/pinka/"><img src="https://img.shields.io/pypi/v/pinka?cacheSeconds=3600" alt="PyPI"></a>
+  <a href="https://pypi.org/project/pinka/"><img src="https://img.shields.io/badge/python-3.9%2B-blue" alt="Python"></a>
   <a href="https://github.com/Gaochengzhi/pinka/actions/workflows/ci.yml"><img src="https://github.com/Gaochengzhi/pinka/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License: MIT"></a>
   <a href="pyproject.toml"><img src="https://img.shields.io/badge/dependencies-none-brightgreen" alt="Dependencies: none"></a>
