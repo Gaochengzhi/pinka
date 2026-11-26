@@ -47,16 +47,22 @@ class Spec:
         return self
 
 
-def new_id() -> str:
-    return "%s-%s" % (time.strftime("%m%d-%H%M%S"), secrets.token_hex(2))
+def new_id(state=None) -> str:
+    """A fresh id, MMDD-HHMMSS-xxxxxx; with a state dir, one not already in its inbox or jobs folder (a list submits
+    hundreds of jobs within one second)."""
+    while True:
+        jid = "%s-%s" % (time.strftime("%m%d-%H%M%S"), secrets.token_hex(3))
+        if state is None or not ((state / "inbox" / ("%s.json" % jid)).exists() or (state / "jobs" / jid).exists()):
+            return jid
 
 
 def submit(cmd, name: str = "job", state=None, **kw) -> str:
     """Queue a job; returns its id. kw: any Spec field."""
     kw.setdefault("owner", os.environ.get("PINKA_JOB_ID") or os.environ.get("USER", ""))
     spec = Spec(cmd=cmd, name=name, **kw).check()
-    jid = new_id()
-    atomic_json(state_dir(state) / "inbox" / ("%s.json" % jid), dict(id=jid, t_submit=time.time(), spec=asdict(spec)))
+    sd = state_dir(state)
+    jid = new_id(sd)
+    atomic_json(sd / "inbox" / ("%s.json" % jid), dict(id=jid, t_submit=time.time(), spec=asdict(spec)))
     return jid
 
 

@@ -2,9 +2,11 @@
 
   pinka daemon [--once]                      the dispatcher (keep it running, e.g. in tmux or a systemd user unit)
   pinka submit --vram GB [flags] -- CMD ...  queue a job; prints its id
+  pinka submit --list JOBS.json [--prefix P]  queue a job list (the `run` format); writes JOBS.ids.json (name -> id)
   pinka fanout --arms a,b,c [--collect CMD] [flags] -- CMD with {arm}
   pinka run JOBS.json [--gpus 0,1]           run a list of jobs here, in the foreground, and exit when all have ended
-  pinka list [--all] | show ID | cancel ID.. | retarget ID.. [--vram GB] [--ram GB] [--gpus 0,1] | wait ID..
+  pinka list [--all] | show ID | cancel ID.. | retarget ID.. [--vram GB] [--ram GB] [--gpus 0,1]
+  pinka wait ID.. | wait --ids-file JOBS.ids.json
   pinka status | usage [--hours H] | history [--all] | config
 
 The state dir is --state-dir, else $PINKA_HOME, else $XDG_STATE_HOME/pinka, else ~/.pinka.
@@ -38,7 +40,35 @@ def _hist(a) -> dict:
     return read_json(state_dir(a.state_dir) / "history.json", {}) or {}
 
 
+LIST_ONLY = ("prefix", "ids_file", "dry")
+NOT_WITH_LIST = dict(name="", key="", vram=None, cpu=None, ram=None, exclusive=False, gpus="", when_exists="", tries=1,
+                     timeout_h=0.0)
+
+
+def cmd_submit_list(a):
+    bad = ["--" + k.replace("_", "-") for k, v in NOT_WITH_LIST.items() if getattr(a, k) != v]
+    if bad or [x for x in a.argv if x != "--"]:
+        sys.exit("with --list, resources and commands come from the list; not allowed: %s" % " ".join(bad or ["CMD"]))
+    from .batch import submit_list
+    try:
+        submit_list(a.list, state=a.state_dir, prefix=a.prefix, ids_file=a.ids_file or None, cwd=a.cwd,
+                    env=dict(kv.split("=", 1) for kv in a.env), copy_env=a.copy_env, owner=a.owner, log_dir=a.log_dir,
+                    priority=a.priority, tag=a.tag, after=_ids(a.after), dry=a.dry, out=sys.stdout)
+    except ValueError as e:
+        sys.exit(str(e))
+    if not a.dry:
+        from .batch import ids_path
+        print("name -> id map: %s" % (a.ids_file or ids_path(a.list)), file=sys.stderr)
+    _warn(J.snapshot(a.state_dir)[3])
+    return 0
+
+
 def cmd_submit(a, arms=None):
+    if arms is None and a.list:
+        return cmd_submit_list(a)
+    bad = ["--" + k.replace("_", "-") for k in LIST_ONLY if getattr(a, k, None)]
+    if bad:
+        sys.exit("%s only with --list" % " ".join(bad))
     cmd = a.argv[1:] if a.argv[:1] == ["--"] else a.argv
     if not cmd:
         sys.exit("no command (put it after --)")
@@ -60,7 +90,7 @@ def cmd_submit(a, arms=None):
     env.update(dict(kv.split("=", 1) for kv in a.env))
     kw = dict(key=a.key, owner=a.owner or os.environ.get("USER", ""), cwd=a.cwd or os.getcwd(), log_dir=a.log_dir,
               env=env, vram_gb=a.vram or 0.0, cpu=int(a.cpu or 0), ram_gb=a.ram or 0.0, exclusive=a.exclusive,
-              gpus=[int(g) for g in _ids(a.gpus)], tag=a.tag, priority=a.priority, after=_ids(a.after),
+              gpus=[int(g) for g in _ids(a.gpus)], tag=a.tag, priority=a.priority or 0.0, after=_ids(a.after),
               when_exists=a.when_exists, tries=a.tries, timeout_h=a.timeout_h)
     if arms is None:
         print(J.submit(cmd, name=name, state=a.state_dir, **kw))
@@ -91,13 +121,13 @@ def cmd_list(a):
         jobs = [j for j in jobs if j["state"] not in FINAL or j.get("t1", 0) > cut]
     order = {"running": 0, "queued": 1, "inbox": 2, "failed": 3, "cancelled": 4, "done": 5}
     jobs.sort(key=lambda j: (order.get(j["state"], 9), -float(j["spec"].get("priority") or 0), j["t_submit"]))
-    print("%-16s %-9s %4s %-22s %11s %7s %5s  %s" % ("id", "state", "card", "name", "vram b/d", "cpu", "age", "why"))
+    print("%-18s %-9s %4s %-22s %11s %7s %5s  %s" % ("id", "state", "card", "name", "vram b/d", "cpu", "age", "why"))
     for j in jobs:
         s = j["spec"]
         vram = "card" if s.get("exclusive") else "%s/%g" % ("%.1f" % j["vram_booked"] if j.get("vram_booked") is not None
                                                             and j["state"] == "running" else "-", s.get("vram_gb") or 0)
         cpu = "%.1f/%s" % (j["cores_peak"], s.get("cpu") or "-") if j["state"] == "running" and j.get("cores_peak") is not None else str(s.get("cpu") or "")
-        print("%-16s %-9s %4s %-22s %11s %7s %5s  %s" % (j["id"][:16], j["state"], "" if j.get("gpu") is None else j["gpu"],
+        print("%-18s %-9s %4s %-22s %11s %7s %5s  %s" % (j["id"][:18], j["state"], "" if j.get("gpu") is None else j["gpu"],
                                                        s["name"][:22], vram, cpu, _age(j.get("t0") or j["t_submit"]),
                                                        (j.get("why") or "")[:120]))
     _warn(age)
@@ -133,7 +163,12 @@ def cmd_retarget(a):
 
 
 def cmd_wait(a):
-    s = J.wait(a.ids, a.poll, a.state_dir)
+    ids = list(a.ids)
+    if a.ids_file:
+        ids += list((read_json(a.ids_file) or sys.exit("cannot read %s" % a.ids_file))["ids"].values())
+    if not ids:
+        sys.exit("give job ids or --ids-file")
+    s = J.wait(ids, a.poll, a.state_dir)
     for i, v in s.items():
         print(i, v)
     return 0 if all(v == "done" for v in s.values()) else 1
@@ -247,8 +282,9 @@ def _submit_flags(s):
     s.add_argument("--exclusive", action="store_true", help="alone on its card")
     s.add_argument("--gpus", default="", help="allowed cards, e.g. 0,2 (default: any)")
     s.add_argument("--tag", default="", help="per-card cap by tag (config tag_caps)")
-    s.add_argument("--priority", type=float, default=0.0, help="higher starts first")
-    s.add_argument("--after", default="", help="ids that must be done first (comma-separated)")
+    s.add_argument("--priority", type=float, default=None, help="higher starts first (default 0)")
+    s.add_argument("--after", default="", help="ids that must be done first (comma-separated); with --list: what the "
+                   "list's jobs without a dependency in the list wait for")
     s.add_argument("--when-exists", default="", help="stay queued until this path exists")
     s.add_argument("--tries", type=int, default=1)
     s.add_argument("--timeout-h", type=float, default=0.0)
@@ -256,7 +292,8 @@ def _submit_flags(s):
     s.add_argument("--no-copy-env", dest="copy_env", action="store_false",
                    help="run with the dispatcher's environment, not this shell's")
     s.add_argument("--cwd", default="")
-    s.add_argument("--log-dir", default="", help="log.txt, STATUS, DONE / ERROR here (default <state>/jobs/<id>)")
+    s.add_argument("--log-dir", default="", help="log.txt, STATUS, DONE / ERROR here (default <state>/jobs/<id>); "
+                   "with --list: <dir>/<name> for each job that sets none")
     s.add_argument("--owner", default="")
     s.add_argument("argv", nargs=argparse.REMAINDER, metavar="CMD")
 
@@ -266,7 +303,16 @@ def main(argv=None):
     ap.add_argument("--state-dir", default=None, help="default: $PINKA_HOME, $XDG_STATE_HOME/pinka, ~/.pinka")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("daemon").add_argument("--once", action="store_true")
-    _submit_flags(sub.add_parser("submit"))
+    s = sub.add_parser("submit")
+    s.add_argument("--list", default="", metavar="JOBS.json",
+                   help="queue a job list in the `pinka run` format instead of one command (after = names in the list, "
+                   "or pool ids); --cwd, --env, --no-copy-env, --owner, --log-dir, --priority, --tag and --after then "
+                   "give defaults for the list's jobs")
+    s.add_argument("--prefix", default="", help="with --list: prepended to every job name (history keys stay unprefixed)")
+    s.add_argument("--ids-file", default="", help="with --list: the name -> id map (default JOBS.ids.json); a "
+                   "resubmit with it keeps jobs queued, running or done with the same command")
+    s.add_argument("--dry", action="store_true", help="with --list: print the plan, submit nothing")
+    _submit_flags(s)
     s = sub.add_parser("fanout")
     s.add_argument("--arms", required=True)
     s.add_argument("--collect", default="", help="shell command run after every arm is done ({arms} = all arms)")
@@ -287,7 +333,8 @@ def main(argv=None):
     s.add_argument("--vram", type=float, default=None)
     s.add_argument("--ram", type=float, default=None)
     s = sub.add_parser("wait")
-    s.add_argument("ids", nargs="+")
+    s.add_argument("ids", nargs="*")
+    s.add_argument("--ids-file", default="", help="also wait for every job of this name -> id map (submit --list)")
     s.add_argument("--poll", type=float, default=30.0)
     sub.add_parser("status")
     sub.add_parser("usage").add_argument("--hours", type=float, default=24.0)

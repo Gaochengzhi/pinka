@@ -22,7 +22,8 @@ card. The name is Mandarin *pīn kǎ* (拼卡): sharing a card, the way people s
 
 - **Measured booking.** A job starts at its declared VRAM; once it has run a while, or its name has a history, it is
   booked at its measured peak, and the space it frees goes to the next job.
-- **Chains and retries.** `--after` dependencies, `--tries`, requeue on CUDA out-of-memory. Every job ends with a
+- **Chains and retries.** `--after` dependencies, `--tries`, requeue on CUDA out-of-memory; `pinka submit --list
+  jobs.json` queues a whole JSON chain with dependencies by name. Every job ends with a
   `DONE` or `ERROR` marker that any script can wait on.
 - **Guards.** A job far above its declaration is stopped and requeued before it takes a neighbour down; host RAM is
   admitted and guarded too.

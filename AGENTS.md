@@ -27,13 +27,13 @@ It is not:
 
 | File | Role |
 |:--|:--|
-| `pinka/__init__.py` | public Python API: `Spec`, `submit`, `cancel`, `retarget`, `fanout`, `wait`; `__version__` |
+| `pinka/__init__.py` | public Python API: `Spec`, `submit`, `submit_list`, `cancel`, `retarget`, `fanout`, `wait`; `__version__` |
 | `pinka/__main__.py` | `python -m pinka` entry point (calls `cli.main`) |
 | `pinka/cli.py` | argparse front end (`pinka` command); the read-only reports `list`, `show`, `status`, `usage`, `history`, `config` |
 | `pinka/jobs.py` | client side: the `Spec` dataclass; submit / cancel / retarget / fanout by dropping files in `inbox/`, `cancel/`, `retarget/`; `wait` and job lookup (clients never write `state.json`) |
 | `pinka/dispatcher.py` | the dispatcher, sole writer of `state.json`: each round ingests the spool, reaps ended trees (retry, requeue, finish), measures running jobs, runs the RAM and VRAM guards, accounts each card, admits and launches jobs, writes `usage.jsonl`, prunes; also the daemon loop and the lock |
 | `pinka/booking.py` | pure functions: history keys, measured booking of VRAM / CPU / RAM, history defaults, same-key group shares |
-| `pinka/batch.py` | `pinka run`: foreground mode for a JSON job list, with resume |
+| `pinka/batch.py` | job lists: loading and checking them; `pinka run` (foreground mode, with resume); `submit_list` (`pinka submit --list`: a list into the shared dispatcher, with resubmit) |
 | `pinka/gpu.py` | GPU backends: `Nvml` (optional pynvml), `NvidiaSmi`, both cached; `Fake` (`fake:2x24`) and `NoGpu`; `backend()` picks one |
 | `pinka/host.py` | host probes: process table (`/proc`, or `ps` elsewhere), owned process trees by (pid, start time) and env token, stopping trees, cores (affinity, cgroup quota), memory (cgroup v2 or host) |
 | `pinka/config.py` | state directory resolution, `DEFAULTS` (every config key, commented), JSON read / atomic write helpers |
@@ -74,13 +74,14 @@ else `~/.pinka`).
 |:--|:--|
 | `daemon [--once]` | the dispatcher loop (one per state dir; a second one exits) |
 | `submit [flags] -- CMD ...` | queue a job, print its id |
+| `submit --list JOBS.json [--prefix P] [--ids-file F] [--dry]` | queue a job list in the shared pool (below), print `id name new/kept` per job, write the name -> id map |
 | `fanout --arms a,b,c [--collect CMD] [flags] -- CMD` | one job per arm (`{arm}` in CMD, `--env` values and `--log-dir`), jobs named NAME-ARM, plus an optional CPU job after all of them (`{arms}` = every arm) |
 | `run JOBS.json [--gpus] [--cpus] [--ram-gb] [--retry-failed]` | foreground mode (below) |
 | `list [--all]` | running and queued jobs, and jobs that ended in the last 6 hours |
 | `show ID` | full job record and log tail |
 | `cancel ID ...` | cancel queued jobs or stop running ones |
 | `retarget ID ... [--vram GB] [--ram GB] [--gpus 0,2]` | change a queued job's declaration or allowed cards; its id stays, so `--after` chains hold |
-| `wait ID ... [--poll S]` | block until the jobs end; exit 0 if all are done |
+| `wait ID ... [--ids-file F] [--poll S]` | block until the jobs (and every job of a `submit --list` map) end; exit 0 if all are done |
 | `status` | cards (used, booked by the pool, used outside it, free), CPU and RAM budget, idle cards next to waiting jobs |
 | `usage [--hours H]` | card-hours split into computing, job running with GPU idle, queued (by cause), no work |
 | `history [--all]` | per history key: runs, VRAM p95/max, cores, RAM; the learned same-key shares |
@@ -95,7 +96,8 @@ left out and the name has history, the default is p95 x 1.2 of earlier runs. A j
 
 ### Python API
 
-`pinka.submit(cmd, name=..., vram_gb=..., after=[...]) -> id`, `pinka.wait(ids)`, `pinka.cancel(id)`,
+`pinka.submit(cmd, name=..., vram_gb=..., after=[...]) -> id`, `pinka.submit_list(path_or_list, prefix=...,
+ids_file=..., after=[...]) -> {name: id}`, `pinka.wait(ids)`, `pinka.cancel(id)`,
 `pinka.retarget(id, vram_gb=...)`, `pinka.fanout(...)`. Every function takes `state=` (a state directory) and
 otherwise resolves it as the CLI does; `submit` accepts any `Spec` field as a keyword.
 
@@ -136,6 +138,36 @@ try, or all of its tries with `--retry-failed`. Anything a killed runner left ru
 SIGTERM stops every job. `CUDA_VISIBLE_DEVICES` on the runner (or `--gpus`) limits which cards it uses, so pinka can
 work inside a reservation that another scheduler gave you. Job ids are the names; markers are
 `jobs.pinka/jobs/<name>/DONE` or `ERROR`.
+
+### A list into the shared pool
+
+```bash
+pinka submit --list jobs.json [--prefix exp1-] [--ids-file F] [--after ID,ID] [--log-dir DIR] [--dry]
+pinka wait --ids-file jobs.ids.json
+```
+
+`pinka run` runs a list in a dispatcher of its own, on cards it does not share. `pinka submit --list` takes the same
+list (same fields, aliases and checks) into the shared dispatcher, where its jobs pack onto cards next to everything
+else in the pool; the daemon has to be running. Each job gets a pool id, and each `after` name is mapped to the id of
+that job; an `after` entry that is no name in the list must be the id of a job the pool knows (a typo is an error,
+not a job that waits forever). Jobs are submitted dependencies first.
+
+- `--prefix P` is put in front of every job name, so two lists with the same names stay apart in `pinka list`. The
+  history key stays the unprefixed name (unless the job sets `key`), so `exp1-train` is booked by what earlier
+  `train` runs measured.
+- `--ids-file F` (default: `jobs.ids.json` next to the list) receives `{"state_dir", "prefix", "ids": {name: id}}`.
+  stdout gets one line per job: `id name new|kept (was STATE)`.
+- `--cwd`, `--env K=V`, `--no-copy-env`, `--owner`, `--priority` and `--tag` are defaults for jobs that leave the field
+  out; a job's own `env` is applied over this shell's environment and the `--env` values. `--log-dir DIR` gives each
+  job without a `log_dir` the folder `DIR/<name>`. `--after ID,...` makes every job with no dependency inside the list
+  wait for those pool jobs as well. The per-job flags (`--name`, `--vram`, `--cpu`, `--ram`, `--exclusive`, `--gpus`,
+  `--tries`, `--timeout-h`, `--when-exists`, a command) are refused: they belong in the list.
+- **Resubmit.** Submitting the list again with the same map file, state directory and prefix keeps each job whose
+  recorded id is queued, running or done with the same command and the same dependency ids. Every other job is
+  submitted again: failed, cancelled or unknown ones, changed ones, and those downstream of a resubmitted job (their
+  dependency ids changed). A queued job that is replaced is cancelled; a running job whose command changed is an
+  error, and nothing is submitted until it is cancelled by hand. `--dry` prints the plan (`new:<name>` for jobs that
+  would be submitted) and writes nothing.
 
 ## How packing and booking work
 
@@ -206,7 +238,8 @@ one adopts them from `state.json`.
 
 ## Using pinka from an agent or script
 
-- **Submit the whole chain at once.** Chain stages with `--after` and submit every stage up front; the dispatcher
+- **Submit the whole chain at once.** Chain stages with `--after` (or write them as one list for `pinka submit
+  --list`, dependencies by name) and submit every stage up front; the dispatcher
   starts each one when its dependencies are done. Do not submit stage 2 by hand after watching stage 1 finish.
 - **GPU jobs only drive the GPU.** Scoring, gates, summaries and clean-up are separate `--vram 0` jobs `--after` the
   GPU jobs they read, so no card sits idle while CPU work runs.
@@ -301,11 +334,12 @@ backend.
   be imported lazily. `pytest` is the only test dependency (the `test` extra).
 - **Python 3.9 compatible.** Modules with annotations start with `from __future__ import annotations`; no `match`, no
   `X | Y` types at runtime, no 3.10+ stdlib APIs.
-- **Tests.** `pip install -e '.[test]'`, then `python -m pytest` (39 tests, about 12 s; Linux or macOS). They use the
+- **Tests.** `pip install -e '.[test]'`, then `python -m pytest` (45 tests, about 15 s; Linux or macOS). They use the
   fake GPU backend and a fake pynvml, and real short shell jobs, so the process-tree code runs too. They live in
   `tests/`: `conftest.py` (a `Pool` fixture: a dispatcher on a temporary state dir with fake cards and fake host
   memory), `test_dispatcher.py` (packing, booking, chains, retries, guards, adoption), `test_booking.py` (the pure
-  booking rules), `test_gpu.py` (backends), `test_batch_cli.py` (foreground mode and the CLI).
+  booking rules), `test_gpu.py` (backends), `test_batch_cli.py` (foreground mode and the CLI), `test_submit_list.py` (lists into the
+  shared pool: ids, `after` by name, prefix, map file, resubmit).
 - **Card memory through `nvmlDeviceGetMemoryInfo` v2.** The v1 call counts reserved memory as used, so an idle card
   looks partly full; keep the v2 call (with a v1 fallback) when touching `gpu.py`.
 - **One writer.** Only the dispatcher writes `state.json`; clients drop files in the spool. Keep it that way.

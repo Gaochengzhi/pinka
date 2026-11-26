@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pinka"
-version = "0.1.0"
+version = "0.2.0"
 description = "Pack GPU jobs onto shared cards by measured memory: a single-node job pool with VRAM/CPU/RAM booking, dependencies and retries"
 readme = "README.md"
 license = "MIT"
