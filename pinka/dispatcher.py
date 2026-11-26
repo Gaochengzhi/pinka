@@ -152,12 +152,13 @@ class Dispatcher:
     def ingest(self) -> None:
         for p in sorted((self.dir / "inbox").glob("*.json")):
             j = read_json(p)
-            p.unlink()
             if not j or j.get("id") in self.st["jobs"]:
+                p.unlink()
                 continue
             j.update(state="queued", tries=0, why="new")
             self.st["jobs"][j["id"]] = j
-            atomic_json(self.jdir(j["id"]) / "spec.json", j)
+            atomic_json(self.jdir(j["id"]) / "spec.json", j)   # before the inbox file goes: a reader always finds the job
+            p.unlink()
             self.status_line(j, "queued")
             self.log("submit", id=j["id"], name=j["spec"]["name"], owner=j["spec"].get("owner"))
         for p in sorted((self.dir / "retarget").glob("*")):
@@ -178,6 +179,17 @@ class Dispatcher:
                 self.finish(j, "cancelled", None, "cancelled while queued")
             else:
                 j["stop"] = "cancelled"
+
+    def recover(self) -> None:
+        """Jobs ingested by a dispatcher that died before it saved state.json: their inbox file is gone, their spec.json is there and
+        they have no final job.json. Queue them again (readers already report them as queued)."""
+        for d in sorted((self.dir / "jobs").iterdir()):
+            if d.name in self.st["jobs"] or (d / "job.json").exists():
+                continue
+            j = read_json(d / "spec.json")
+            if j and j.get("id") == d.name and j.get("spec"):
+                self.st["jobs"][d.name] = dict(j, state="queued", tries=0, why="new")
+                self.log("recover", id=d.name, name=j["spec"].get("name"))
 
     # ------------------------------------------------------------------------------------------ end of tries
     def finish(self, j: dict, state: str, rc, why: str) -> None:
@@ -744,6 +756,7 @@ class Dispatcher:
             except OSError:
                 raise SystemExit("another dispatcher owns %s" % self.dir)
             self.st = read_json(self.dir / "state.json", None) or {"jobs": {}}
+            self.recover()
             if prepare:
                 prepare(self)
             for sig in (signal.SIGTERM, signal.SIGINT):

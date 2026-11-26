@@ -123,3 +123,20 @@ def test_cli_submit_list_and_wait(tmp_path, capsys):
     capsys.readouterr()
     assert cli.main(["--state-dir", sd, "wait", "--ids-file", str(tmp_path / "jobs.ids.json"), "--poll", "0.1"]) == 0
     assert capsys.readouterr().out.count("done") == 3
+
+
+def test_a_job_between_inbox_and_state_is_found(tmp_path):
+    """The dispatcher has read a job from the inbox but not yet saved state.json: readers see it queued, and a dispatcher that died in
+    that moment queues it again when it restarts."""
+    from pinka import gpu as G
+    from pinka.dispatcher import Dispatcher
+    sd = tmp_path / "s"
+    jid = J.submit("true", state=sd)
+    d = Dispatcher(sd, cfg=dict(memory_source="none", pin_cpus=False), gpu=G.Fake("1x24"))
+    d.ingest()                                                   # inbox file gone, state.json not saved
+    assert not list((sd / "inbox").glob("*.json")) and not (sd / "state.json").exists()
+    assert J.job_states([jid], sd) == {jid: "queued"} and J.find(jid, sd)["spec"]["cmd"] == "true"
+    d2 = Dispatcher(sd, cfg=dict(memory_source="none", pin_cpus=False), gpu=G.Fake("1x24"))
+    d2.st = {"jobs": {}}
+    d2.recover()
+    assert d2.st["jobs"][jid]["state"] == "queued"

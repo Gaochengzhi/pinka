@@ -115,11 +115,23 @@ def snapshot(state=None) -> tuple:
     return st, status, inbox, age
 
 
+def _on_disk(jid: str, state=None):
+    """A job not in state.json or the inbox: its final record jobs/<id>/job.json, else its jobs/<id>/spec.json (read from the inbox in
+    this round, state.json not yet saved: queued)."""
+    d = state_dir(state) / "jobs" / jid
+    j = read_json(d / "job.json")
+    if j is None:
+        j = read_json(d / "spec.json")
+        if j is not None:
+            j = dict(j, state="queued")
+    return j
+
+
 def find(jid: str, state=None):
-    """A job record: from state.json, the inbox, or (after it left state.json) its jobs/<id>/job.json."""
+    """A job record: from state.json, the inbox, or its folder (_on_disk)."""
     st, _, inbox, _ = snapshot(state)
     j = st["jobs"].get(jid) or next((dict(x, state="inbox") for x in inbox if x["id"] == jid), None)
-    return j or read_json(state_dir(state) / "jobs" / jid / "job.json")
+    return j or _on_disk(jid, state)
 
 
 def job_states(ids, state=None) -> dict:
@@ -128,7 +140,7 @@ def job_states(ids, state=None) -> dict:
     out.update({i: j["state"] for i, j in st["jobs"].items()})
     for i in ids:
         if i not in out:
-            out[i] = (read_json(state_dir(state) / "jobs" / i / "job.json") or {}).get("state", "unknown")
+            out[i] = (_on_disk(i, state) or {}).get("state", "unknown")
     return {i: out[i] for i in ids}
 
 

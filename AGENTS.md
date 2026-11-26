@@ -275,6 +275,10 @@ $PINKA_HOME/
     log.txt, STATUS  unless --log-dir is given; the log dir also gets its own DONE / ERROR
 ```
 
+The dispatcher writes `jobs/<id>/spec.json` before it removes the inbox file, so a reader always finds a submitted job:
+in `state.json`, in the inbox, or (read this round, `state.json` not yet saved) as queued from its `spec.json`. A dispatcher
+that starts queues again any job with a `spec.json`, no `job.json` and no entry in `state.json` (event `recover`).
+
 To wait for a job from a shell without pinka, block on `jobs/<id>/DONE` or `ERROR`. These appear in the job folder
 whether or not `--log-dir` was given.
 
@@ -334,7 +338,7 @@ backend.
   be imported lazily. `pytest` is the only test dependency (the `test` extra).
 - **Python 3.9 compatible.** Modules with annotations start with `from __future__ import annotations`; no `match`, no
   `X | Y` types at runtime, no 3.10+ stdlib APIs.
-- **Tests.** `pip install -e '.[test]'`, then `python -m pytest` (45 tests, about 15 s; Linux or macOS). They use the
+- **Tests.** `pip install -e '.[test]'`, then `python -m pytest` (46 tests, about 15 s; Linux or macOS). They use the
   fake GPU backend and a fake pynvml, and real short shell jobs, so the process-tree code runs too. They live in
   `tests/`: `conftest.py` (a `Pool` fixture: a dispatcher on a temporary state dir with fake cards and fake host
   memory), `test_dispatcher.py` (packing, booking, chains, retries, guards, adoption), `test_booking.py` (the pure
